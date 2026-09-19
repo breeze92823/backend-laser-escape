@@ -111,4 +111,27 @@ describe("testing your Colyseus app", () => {
     assert.strictEqual(respawned.hp, 100);
     assert.strictEqual(respawned.dead, false);
   });
+
+  // No MONGODB_URI in this test env (matches a real local `npm start` with no
+  // Mongo running) -- exercises the degraded path client systems/db.ts §
+  // ArenaRoom.ts both promise: a signed-in join and a saveProgress message
+  // must behave exactly like a guest, never throw or drop the connection.
+  it("degrades to no-op persistence when Mongo is unreachable", async () => {
+    const room = await colyseus.createRoom<ArenaState>("arena", {});
+    const client1 = await colyseus.connectTo(room, { userId: "bloxity-user-1" });
+
+    client1.send("saveProgress", {
+      power: 42,
+      rebirth: 1,
+      wins: 7,
+      ownedHexPads: [0, 1],
+      equippedHexPad: 1,
+      ownedAuras: [],
+      equippedAura: null,
+    });
+    await room.waitForNextPatch();
+
+    // Nothing crashed and the connection is still alive.
+    assert.strictEqual(client1.state.players.get(client1.sessionId).username, "");
+  });
 });
