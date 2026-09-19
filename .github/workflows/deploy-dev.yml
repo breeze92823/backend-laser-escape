@@ -1,0 +1,44 @@
+name: Deploy to Bloxity Legion (dev)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  # Repo variable, set under Settings -> Secrets and variables -> Actions -> Variables.
+  # Must match the lowercase game ID created on the Bloxity "My Games" dashboard.
+  GAME_ID: ${{ vars.BLOXITY_GAME_ID }}
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.GAME_ID }}-server:dev-${{ github.sha }}
+
+      - name: Deploy to Legion (dev channel)
+        run: |
+          curl -sSf -X POST "https://legion.bloxity.io/v1/apps/${GAME_ID}/deploy" \
+            -H "Authorization: Bearer ${LEGION_DEPLOY_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"channel\":\"dev\",\"image\":\"${REGISTRY}/${{ github.repository_owner }}/${GAME_ID}-server:dev-${{ github.sha }}\",\"version\":\"${{ github.sha }}\",\"seatCap\":50,\"maxReplicas\":5}"
+        env:
+          LEGION_DEPLOY_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN }}

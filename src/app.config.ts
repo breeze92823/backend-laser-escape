@@ -26,9 +26,16 @@ const server = defineServer({
    */
   express: (app) => {
 
-    // Wildcard origin is fine for local dev only -- this has no deploy
-    // target yet; add a real allowlist before deploying anywhere.
-    app.use(cors());
+    // Readiness/liveness probe required by Bloxity Legion.
+    app.get("/health", (_req, res) => {
+      res.sendStatus(200);
+    });
+
+    // Bloxity injects CLIENT_ORIGIN in deployed environments; wildcard
+    // remains for local dev where the var isn't set.
+    app.use(cors({
+      origin: process.env.CLIENT_ORIGIN || "*",
+    }));
 
     /**
      * Use @colyseus/monitor
