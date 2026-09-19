@@ -20,6 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate required config
+        run: |
+          if [ -z "${GAME_ID}" ]; then
+            echo "::error::Repo variable BLOXITY_GAME_ID is not set (Settings > Secrets and variables > Actions > Variables)."
+            exit 1
+          fi
+          if [ -z "${LEGION_DEPLOY_TOKEN}" ]; then
+            echo "::error::Repo secret LEGION_DEPLOY_TOKEN is not set (Settings > Secrets and variables > Actions > Secrets)."
+            exit 1
+          fi
+        env:
+          LEGION_DEPLOY_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN }}
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
