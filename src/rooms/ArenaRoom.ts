@@ -155,6 +155,21 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
         console.warn("[ArenaRoom] saveProgress failed", err);
       }
     },
+    // Re-states this connection's identity after a login/logout/account
+    // switch that happens AFTER join (the common case -- a guest who signs in
+    // mid-session, or a signed-in player who logs out without reloading).
+    // `onJoin` only ever sees whatever was true the instant the socket opened;
+    // without this, a player who logs in after joining as a guest would keep
+    // `this.userIds` empty forever and `saveProgress` would silently no-op
+    // for their whole session -- exactly the bug this fixes. Same shape as
+    // `setAvatar` (client systems/net.js sendIdentityNow(), fired from a
+    // subscribeAuth callback, not a fixed cadence).
+    identify: (client: Client, msg: { username?: string; userId?: string }) => {
+      const p = this.state.players.get(client.sessionId);
+      if (!p) return;
+      if (typeof msg?.username === "string") p.username = msg.username.slice(0, 64);
+      this.setUserId(client, p, typeof msg?.userId === "string" ? msg.userId : "");
+    },
   };
 
   onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
@@ -167,16 +182,30 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
     p.avatar = sanitizeAvatar(options?.avatar);
     this.state.players.set(client.sessionId, p);
 
-    // Bloxity user id (client systems/bloxity.js getStableUserId(), same
-    // `_id` shape already used for a friend entry) -- client-trusted, same
-    // model as username/avatar above. A forged id can only ever read/overwrite
-    // the SENDER's own save (there is no cross-player read in `saveProgress`),
-    // so this carries no more risk than every other client-trusted field this
-    // room already relays.
-    const userId = typeof options?.userId === "string" ? options.userId.slice(0, 128) : "";
+    this.setUserId(client, p, options?.userId ?? "");
+  }
+
+  // Bloxity user id (client systems/bloxity.js getStableUserId(), same `_id`
+  // shape already used for a friend entry) -- client-trusted, same model as
+  // username/avatar. A forged id can only ever read/overwrite the SENDER's
+  // own save (there is no cross-player read in `saveProgress`), so this
+  // carries no more risk than every other client-trusted field this room
+  // already relays. Called from both onJoin and the `identify` message so a
+  // login/logout that happens mid-session is handled exactly like one that
+  // happened before join.
+  private setUserId(client: Client, p: PlayerState, raw: string) {
+    const userId = typeof raw === "string" ? raw.slice(0, 128) : "";
+    const prev = this.userIds.get(client.sessionId) || "";
+    if (userId === prev) return; // no change -- e.g. a username-only identify
+
     if (userId) {
       this.userIds.set(client.sessionId, userId);
       this.loadProgress(client, userId, p);
+    } else {
+      // Logged out: stop persisting for this connection. The client flushes
+      // a final saveProgress under the OLD id before sending this (see
+      // sendIdentityNow()'s comment), so nothing made while signed in is lost.
+      this.userIds.delete(client.sessionId);
     }
   }
 
