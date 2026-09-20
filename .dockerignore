@@ -1,0 +1,15 @@
+node_modules
+build
+test
+loadtest
+.git
+.github
+.vscode
+.idea
+coverage
+.nyc_output
+*.md
+.env
+.env.*
+!.env.example
+npm-debug.log*

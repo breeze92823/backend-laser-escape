@@ -111,4 +111,60 @@ describe("testing your Colyseus app", () => {
     assert.strictEqual(respawned.hp, 100);
     assert.strictEqual(respawned.dead, false);
   });
+
+  // No MONGODB_URI in this test env (matches a real local `npm start` with no
+  // Mongo running) -- exercises the degraded path client systems/db.ts §
+  // ArenaRoom.ts both promise: a signed-in join and a saveProgress message
+  // must behave exactly like a guest, never throw or drop the connection.
+  it("degrades to no-op persistence when Mongo is unreachable", async () => {
+    const room = await colyseus.createRoom<ArenaState>("arena", {});
+    const client1 = await colyseus.connectTo(room, { userId: "bloxity-user-1" });
+
+    client1.send("saveProgress", {
+      power: 42,
+      rebirth: 1,
+      wins: 7,
+      ownedHexPads: [0, 1],
+      equippedHexPad: 1,
+      ownedAuras: [],
+      equippedAura: null,
+    });
+    await room.waitForNextPatch();
+
+    // Nothing crashed and the connection is still alive.
+    assert.strictEqual(client1.state.players.get(client1.sessionId).username, "");
+  });
+
+  // The bug this was written for: a player who joins as a guest (no
+  // `userId` yet -- the SDK's auth hasn't settled), then signs in, then logs
+  // back out -- all in the same room session, never rejoining. Without the
+  // `identify` message, ArenaRoom.userIds stays empty forever and
+  // saveProgress silently no-ops for that whole session even while "signed
+  // in", which is exactly what made progress never survive a refresh.
+  it("registers/clears the room's userId mapping via identify, independent of join", async () => {
+    const room = await colyseus.createRoom<ArenaState>("arena", {});
+    // Joined as a guest -- no userId in the join options.
+    const client1 = await colyseus.connectTo(room, { username: "Epic86" });
+    assert.strictEqual(room.userIds.has(client1.sessionId), false);
+
+    // Signs in mid-session: client systems/net.js sendIdentityNow().
+    client1.send("identify", { username: "RealBloxityName", userId: "bloxity-user-1" });
+    await room.waitForNextPatch();
+    assert.strictEqual(room.userIds.get(client1.sessionId), "bloxity-user-1");
+    assert.strictEqual(client1.state.players.get(client1.sessionId).username, "RealBloxityName");
+
+    // saveProgress now actually registers against the signed-in id (still
+    // exercising the "Mongo unreachable" degraded path -- see the test
+    // above -- but the mapping itself is what we're asserting here).
+    client1.send("saveProgress", { power: 99 });
+    await room.waitForNextPatch();
+
+    // Logs out without reloading: the mapping is dropped and the displayed
+    // name reverts, so a leaderboard reading this row stops attributing
+    // further play to the signed-in account.
+    client1.send("identify", { username: "Epic86", userId: "" });
+    await room.waitForNextPatch();
+    assert.strictEqual(room.userIds.has(client1.sessionId), false);
+    assert.strictEqual(client1.state.players.get(client1.sessionId).username, "Epic86");
+  });
 });

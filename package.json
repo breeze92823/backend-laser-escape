@@ -34,6 +34,7 @@
     "@colyseus/tools": "^0.18.1",
     "colyseus": "^0.18.2",
     "cors": "^2.8.6",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "mongodb": "^6.10.0"
   }
 }
