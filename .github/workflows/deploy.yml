@@ -1,8 +1,8 @@
-name: Deploy to Bloxity Legion (dev)
+name: Deploy to Bloxity Legion
 
 on:
   push:
-    branches: [dev]
+    branches: [dev, main]
   workflow_dispatch:
 
 env:
@@ -12,13 +12,22 @@ env:
   GAME_ID: ${{ vars.BLOXITY_GAME_ID }}
 
 jobs:
-  deploy-dev:
+  deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set deploy channel
+        id: channel
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "channel=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=dev" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Validate required config
         run: |
@@ -45,13 +54,14 @@ jobs:
         with:
           context: .
           push: true
-          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.GAME_ID }}-server:dev-${{ github.sha }}
+          tags: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.GAME_ID }}-server:${{ steps.channel.outputs.channel }}-${{ github.sha }}
 
-      - name: Deploy to Legion (dev channel)
+      - name: Deploy to Legion
         run: |
           curl -sSf -X POST "https://legion.bloxity.io/v1/apps/${GAME_ID}/deploy" \
             -H "Authorization: Bearer ${LEGION_DEPLOY_TOKEN}" \
             -H 'Content-Type: application/json' \
-            -d "{\"channel\":\"dev\",\"image\":\"${REGISTRY}/${{ github.repository_owner }}/${GAME_ID}-server:dev-${{ github.sha }}\",\"version\":\"${{ github.sha }}\",\"seatCap\":50,\"maxReplicas\":5}"
+            -d "{\"channel\":\"${CHANNEL}\",\"image\":\"${REGISTRY}/${{ github.repository_owner }}/${GAME_ID}-server:${CHANNEL}-${{ github.sha }}\",\"version\":\"${{ github.sha }}\",\"seatCap\":50,\"maxReplicas\":5}"
         env:
           LEGION_DEPLOY_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN }}
+          CHANNEL: ${{ steps.channel.outputs.channel }}
