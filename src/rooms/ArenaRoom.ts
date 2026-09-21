@@ -1,7 +1,14 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { ArenaState, PlayerState } from "./schema/ArenaState.js";
-import { TARGET_IDS } from "../constants.js";
+import { TARGET_IDS, LEADERBOARD_REFRESH_MS, LEADERBOARD_QUERY_LIMIT } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
+
+// The 3 stats client components/LeaderboardBoard.jsx ranks by (one board per
+// entry in client data/leaderboardBoard.js's LEADERBOARD_TRANSFORMS).
+const LEADERBOARD_STATS = ["power", "rebirth", "wins"] as const;
+type LeaderboardStat = (typeof LEADERBOARD_STATS)[number];
+type LeaderboardRow = { id: string; name: string; value: number };
+type LeaderboardPayload = Record<LeaderboardStat, LeaderboardRow[]>;
 
 // Cap on the JSON avatar blob (see ArenaState.ts PlayerState.avatar). A full
 // equipped set + 7 proportions serialises to a few hundred bytes; 4 KB is
@@ -145,10 +152,18 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       if (!players) return; // Mongo unset/unreachable -- degrade silently
       const patch = sanitizeProgress(msg);
       if (!patch) return;
+      // Read off this connection's own PlayerState rather than trust a
+      // username in `msg` -- refreshLeaderboard() below needs a display name
+      // for players who are offline by the time it queries Mongo, and this is
+      // the same already-sanitized value onJoin/identify put on the schema.
+      const p = this.state.players.get(client.sessionId);
       try {
         await players.updateOne(
           { _id: userId },
-          { $set: { ...patch, updatedAt: new Date() }, $setOnInsert: { version: 1 } },
+          {
+            $set: { ...patch, username: p?.username || "Player", updatedAt: new Date() },
+            $setOnInsert: { version: 1 },
+          },
           { upsert: true },
         );
       } catch (err) {
@@ -171,6 +186,20 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       this.setUserId(client, p, typeof msg?.userId === "string" ? msg.userId : "");
     },
   };
+
+  // Kicks off the periodic global-leaderboard broadcast (see
+  // refreshLeaderboard() below). Runs once immediately -- a fresh room
+  // shouldn't sit on an empty board for a full LEADERBOARD_REFRESH_MS before
+  // its first broadcast -- then on a timer. `this.clock` is colyseus's own
+  // per-room clock, wrapped to swallow a callback's thrown/rejected error per
+  // tick so one bad refresh (e.g. a transient Mongo hiccup) can't take the
+  // room down.
+  onCreate() {
+    void this.refreshLeaderboard();
+    this.clock.setInterval(() => {
+      void this.refreshLeaderboard();
+    }, LEADERBOARD_REFRESH_MS);
+  }
 
   onJoin(client: Client, options?: { username?: string; avatar?: string; userId?: string }) {
     // No spawn assignment -- the client already hardcodes spawnPosition
@@ -266,5 +295,84 @@ export class ArenaRoom extends Room<{ state: ArenaState }> {
       this.state.players.delete(client.sessionId);
       this.userIds.delete(client.sessionId);
     }
+  }
+
+  // Builds and broadcasts the merged "all-time saved + currently online"
+  // leaderboard client components/LeaderboardBoard.jsx renders (one row list
+  // per stat). Only the server can compute this: it alone has both the live
+  // roster (this.state.players) AND the sessionId->Bloxity-userId map
+  // (this.userIds, deliberately NOT part of the synced schema -- see its own
+  // comment above) needed to tell "this online player already IS one of the
+  // saved accounts" apart from "this saved account is offline right now".
+  //
+  // A private, standalone method (rather than inlined in the onCreate timer)
+  // so tests can call and await it directly without waiting on the interval.
+  private async refreshLeaderboard() {
+    // One pass over the live roster, reused for all 3 stats below, rather
+    // than re-walking this.state.players per stat.
+    const onlineRows: { sessionId: string; userId: string | null; username: string; power: number; rebirth: number; wins: number }[] = [];
+    const onlineUserIds = new Set<string>();
+    this.state.players.forEach((p, sessionId) => {
+      const userId = this.userIds.get(sessionId) ?? null;
+      if (userId) onlineUserIds.add(userId);
+      onlineRows.push({
+        sessionId,
+        userId,
+        username: p.username || "Player",
+        power: p.power,
+        rebirth: p.rebirth,
+        wins: p.wins,
+      });
+    });
+
+    const players = getPlayers();
+    const payload = { power: [], rebirth: [], wins: [] } as LeaderboardPayload;
+
+    for (const stat of LEADERBOARD_STATS) {
+      // Online rows first: a currently-connected player's live value is
+      // always more current than whatever their last debounced saveProgress
+      // wrote to Mongo, whether they're signed in or just a guest.
+      const merged: LeaderboardRow[] = onlineRows.map((row) => ({
+        id: row.sessionId,
+        name: row.username,
+        value: row[stat],
+      }));
+
+      // Then everyone who has EVER saved, minus accounts already represented
+      // live above -- Mongo unreachable just means this half is skipped, same
+      // degrade-to-online-only posture as every other Mongo path in this room.
+      if (players) {
+        try {
+          const docs = await players
+            .find({}, { projection: { _id: 1, username: 1, [stat]: 1 } })
+            .sort({ [stat]: -1 })
+            .limit(LEADERBOARD_QUERY_LIMIT)
+            .toArray();
+
+          let offlineIndex = 0;
+          for (const doc of docs) {
+            if (onlineUserIds.has(doc._id)) continue; // already added live, above
+            // A synthetic id, not the real Bloxity _id -- there's no reader-
+            // facing need to broadcast another account's raw id to every
+            // client (same reasoning ArenaState.ts already gives for keeping
+            // userId off the synced schema), and the client never needs an
+            // offline row's real identity: a viewer is online by definition,
+            // so their own row always comes from `onlineRows` above.
+            merged.push({
+              id: `offline:${stat}:${offlineIndex++}`,
+              name: doc.username || "Player",
+              value: (doc[stat] as number | undefined) ?? 0,
+            });
+          }
+        } catch (err) {
+          console.warn(`[ArenaRoom] leaderboard query failed for stat=${stat}`, err);
+        }
+      }
+
+      merged.sort((a, b) => b.value - a.value);
+      payload[stat] = merged.slice(0, LEADERBOARD_QUERY_LIMIT);
+    }
+
+    this.broadcast("leaderboard", payload);
   }
 }
